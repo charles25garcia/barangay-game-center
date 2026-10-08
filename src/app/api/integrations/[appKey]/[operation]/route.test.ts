@@ -1,6 +1,6 @@
 /** @jest-environment node */
 
-import { createGameRegistration, findGameRegistration, readState, resetState } from "@code/database/sqlite";
+import { consumeParentLaunch, createGameRegistration, findGameRegistration, readParentPlayerState, resetState, saveParentPlayerState } from "@code/database/sqlite";
 import { signInbetweenPayload } from "@code/database/providerSecurity";
 import { POST } from "./route";
 import { GameCategory, GameLaunchType, GameStatus } from "@shared/enums";
@@ -38,6 +38,18 @@ function signedBody(body: Record<string, unknown>) {
 
 beforeEach(() => {
   resetState();
+  consumeParentLaunch({
+    id: "player-demo-001",
+    displayName: "Juan Dela Cruz",
+    homeBarangay: "Barangay San Isidro",
+    barangayId: "brgy-001",
+    role: "resident",
+    isActive: true,
+  }, "provider-test-launch", "provider-test-session", Math.floor(Date.now() / 1000) + 60);
+  const playerState = readParentPlayerState("player-demo-001")!;
+  playerState.wallet.balance = 250;
+  playerState.adminUsers.users[0].coinBalance = 250;
+  saveParentPlayerState("player-demo-001", playerState);
   const registration = createGameRegistration(registrationInput);
   appKey = registration.appKey;
   secret = findGameRegistration(appKey)?.signingSecret ?? "";
@@ -46,6 +58,21 @@ beforeEach(() => {
 afterEach(() => resetState());
 
 describe("registered app integration", () => {
+  it.each(["", "{", "null", "[]", '"text"', "42", "true", "username=player-demo-001"])("rejects a non-object or invalid JSON body (%s) without changing the wallet", async (body) => {
+    const response = await POST(new Request("http://localhost/api", {
+      method: "POST",
+      body,
+    }), { params: Promise.resolve({ appKey, operation: "auth" }) });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      status: false,
+      data: null,
+      message: "Request body must be a valid JSON object.",
+    });
+    expect(readParentPlayerState("player-demo-001")!.wallet.balance).toBe(250);
+  });
+
   it("authenticates a signed app request", async () => {
     const body = signedBody({ username: "player-demo-001", userToken: "provider-token", gameType: "classic" });
     const response = await POST(new Request("http://localhost/api", { method: "POST", body: JSON.stringify(body) }), {
@@ -60,7 +87,7 @@ describe("registered app integration", () => {
 
   it("records a signed chip transaction once and makes retries duplicate-safe", async () => {
     const body = signedBody({
-      username: "player-001",
+      username: "player-demo-001",
       chips: 25,
       gameType: "classic",
       transId: "provider-txn-001",
@@ -105,7 +132,7 @@ describe("registered app integration", () => {
 
   it("uses the registered field contract for deduct requests and preserves provenance", async () => {
     const body = signedBody({
-      username: "player-001",
+      username: "player-demo-001",
       chips: 10,
       gameType: "classic",
       transId: "provider-deduct-001",
@@ -142,11 +169,15 @@ describe("registered app integration", () => {
     expect(first.status).toBe(201);
     expect(retry.status).toBe(200);
     expect((await retry.json()).data).toMatchObject({ status: "duplicate", balance: 200 });
-    expect(readState().wallet.balance).toBe(200);
-    expect(readState().wallet.transactions.filter((transaction) => transaction.source === `registered-app:${appKey}`)).toHaveLength(1);
+    const playerState = readParentPlayerState("player-demo-001")!;
+    expect(playerState.wallet.balance).toBe(200);
+    expect(playerState.wallet.transactions.filter((transaction) => transaction.source === `registered-app:${appKey}`)).toHaveLength(1);
   });
 
   it("returns the current zero balance when retrying an exhausted-wallet deduct", async () => {
+    const playerState = readParentPlayerState("player-demo-001")!;
+    playerState.wallet.balance = 250;
+    saveParentPlayerState("player-demo-001", playerState);
     const body = signedBody({ username: "player-demo-001", amount: 250, gameType: "rush", transId: "empty-wallet-001", transactionType: "rushCallBets" });
     const request = () => new Request("http://localhost/api", { method: "POST", body: JSON.stringify(body) });
     const context = { params: Promise.resolve({ appKey, operation: "deduct-chips" }) };
@@ -160,7 +191,7 @@ describe("registered app integration", () => {
     const retryBody = await retry.json();
     expect(retryBody.data).toMatchObject({ status: "duplicate", balance: 0 });
     expect(retryBody.sign).toBe(signInbetweenPayload(retryBody.data, secret));
-    expect(readState().wallet.transactions.filter((transaction) => transaction.source === `registered-app:${appKey}`)).toHaveLength(1);
+    expect(readParentPlayerState("player-demo-001")!.wallet.transactions.filter((transaction) => transaction.source === `registered-app:${appKey}`)).toHaveLength(1);
   });
 
   it("uses the active profile when the four required transaction fields omit a user", async () => {
@@ -170,8 +201,8 @@ describe("registered app integration", () => {
     });
 
     expect(response.status).toBe(201);
-    expect(readState().wallet.balance).toBe(255);
-    expect(readState().adminUsers.history[0].userId).toBe("player-demo-001");
+    expect(readParentPlayerState("player-demo-001")!.wallet.balance).toBe(255);
+    expect(readParentPlayerState("player-demo-001")!.adminUsers.history[0].userId).toBe("player-demo-001");
   });
 
   it.each([
@@ -187,7 +218,7 @@ describe("registered app integration", () => {
 
     expect(response.status).toBe(400);
     expect((await response.json()).message).toContain(field);
-    expect(readState().wallet.balance).toBe(250);
+    expect(readParentPlayerState("player-demo-001")!.wallet.balance).toBe(250);
   });
 
   it("returns the signed balance for a known user", async () => {

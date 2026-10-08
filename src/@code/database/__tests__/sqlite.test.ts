@@ -2,10 +2,13 @@ import Database from "better-sqlite3";
 import {
   applySandboxCoinConversionMigration,
   createGameRegistration,
+  consumeParentLaunch,
   listGameRegistrations,
+  readParentPlayerState,
   readState,
   revealGameRegistrationCredentials,
   resetState,
+  saveParentPlayerState,
   saveState,
 } from "@code/database/sqlite";
 import { GameCategory, GameLaunchType, GameStatus } from "@shared/enums";
@@ -128,5 +131,30 @@ describe("SQLite state repository", () => {
     expect(listGameRegistrations()).toEqual(expect.arrayContaining([
       expect.not.objectContaining({ signingSecret: expect.anything() }),
     ]));
+  });
+
+  it("provisions isolated zero-balance parent players and consumes each launch token once", () => {
+    const firstUser = {
+      id: "parent-user-1",
+      displayName: "First Resident",
+      homeBarangay: "Barangay One",
+      barangayId: "brgy-001",
+      role: "resident" as const,
+      isActive: true,
+    };
+    const secondUser = { ...firstUser, id: "parent-user-2", displayName: "Second Resident" };
+
+    expect(consumeParentLaunch(firstUser, "launch-once", "parent-session-1", Date.now() + 60_000)).toBe(true);
+    expect(consumeParentLaunch(firstUser, "launch-once", "parent-session-1", Date.now() + 60_000)).toBe(false);
+    expect(consumeParentLaunch(secondUser, "launch-second", "parent-session-2", Date.now() + 60_000)).toBe(true);
+
+    const firstState = readParentPlayerState(firstUser.id)!;
+    const secondState = readParentPlayerState(secondUser.id)!;
+    expect(firstState.profile).toMatchObject({ id: firstUser.id, displayName: firstUser.displayName, role: "player" });
+    expect(firstState.wallet.balance).toBe(0);
+    saveParentPlayerState(firstUser.id, { ...firstState, wallet: { ...firstState.wallet, balance: 7 } });
+    expect(readParentPlayerState(firstUser.id)?.wallet.balance).toBe(7);
+    expect(readParentPlayerState(secondUser.id)?.wallet.balance).toBe(0);
+    expect(readState().profile.id).not.toBe(firstUser.id);
   });
 });

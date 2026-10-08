@@ -1,24 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { findGameRegistration, readState } from "@code/database/sqlite";
+import { findGameRegistration } from "@code/database/sqlite";
 import { signInbetweenPayload } from "@code/database/providerSecurity";
+import { getGameCenterSession } from "@code/auth/parentSession";
 
 export const runtime = "nodejs";
 
-export function GET(request: Request, context: { params: Promise<{ appKey: string }> }) {
-  return context.params.then(({ appKey }) => {
+export async function GET(_request: Request, context: { params: Promise<{ appKey: string }> }) {
+  const session = await getGameCenterSession();
+  if (!session) return NextResponse.json({ message: "Parent platform sign-in required." }, { status: 401 });
+  const { appKey } = await context.params;
     const registrationRecord = findGameRegistration(appKey);
     if (!registrationRecord) return NextResponse.json({ message: "Registered app not found." }, { status: 404 });
     if (!registrationRecord.registration.active || registrationRecord.registration.status !== "active") {
       return NextResponse.json({ message: "Registered app is not active." }, { status: 403 });
     }
 
-    const state = readState();
-    const requestedPlayerId = request.headers.get("x-player-id") || state.profile.id;
-    const platformUser = state.profile.id === requestedPlayerId
-      ? state.profile
-      : state.adminUsers.users.find((user) => user.id === requestedPlayerId);
-    if (!platformUser) return NextResponse.json({ message: "Player was not found." }, { status: 404 });
+    const platformUser = session.user;
 
     const payload = {
       username: platformUser.id,
@@ -29,7 +27,7 @@ export function GET(request: Request, context: { params: Promise<{ appKey: strin
     const launchPayload = {
       ...payload,
       displayName: platformUser.displayName,
-      avatarEmoji: platformUser.avatarEmoji,
+      avatarEmoji: "🙂",
       homeBarangay: platformUser.homeBarangay,
     };
     const sign = signInbetweenPayload(payload, registrationRecord.signingSecret);
@@ -42,5 +40,4 @@ export function GET(request: Request, context: { params: Promise<{ appKey: strin
       payload: launchPayload,
       sign,
     });
-  });
 }

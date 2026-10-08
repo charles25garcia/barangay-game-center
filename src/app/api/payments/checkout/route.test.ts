@@ -3,6 +3,10 @@
 import { resetState } from "@code/database/sqlite";
 import { POST } from "./route";
 
+jest.mock("@code/auth/parentSession", () => ({
+  getGameCenterSession: jest.fn().mockResolvedValue({ user: { id: "parent-player-001" } }),
+}));
+
 describe("PayMongo test checkout", () => {
   const originalSecret = process.env.PAYMONGO_SECRET_KEY;
   const originalWebhookSecret = process.env.PAYMONGO_TEST_WEBHOOK_SECRET;

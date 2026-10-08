@@ -59,6 +59,7 @@ export async function POST(request: Request) {
   }
 
   const outcome = fulfillCoinPurchase({
+    playerId: purchase.playerId,
     referenceNumber,
     checkoutSessionId: sessionId,
     paymentId: paidPayment.id,

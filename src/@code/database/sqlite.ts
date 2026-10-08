@@ -3,12 +3,102 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { RootState } from "@code/state/store";
-import { CoinAdjustmentType, TransactionType } from "@shared/enums";
+import { AuthorRole, CoinAdjustmentType, TransactionType, UserStatus } from "@shared/enums";
 import type { CoinPackage, GameRegistration, GameRegistrationInput, ProviderTransaction } from "@shared/types";
 import { encryptProviderSecret, decryptProviderSecret } from "./providerSecurity";
+import type { ParentGameIdentity } from "@code/auth/parentSession";
 
 type PersistedKey = keyof RootState;
 type PersistedState = RootState;
+
+function parentRoleToGameCenterRole(role: ParentGameIdentity["role"]): AuthorRole {
+  if (role === "super_admin") return AuthorRole.SuperAdmin;
+  if (role === "admin") return AuthorRole.BrgyAdmin;
+  return AuthorRole.Player;
+}
+
+function createParentPlayerState(user: ParentGameIdentity): PersistedState {
+  const demoState = readState();
+  const role = parentRoleToGameCenterRole(user.role);
+  const managedUser = {
+    id: user.id,
+    displayName: user.displayName,
+    avatarEmoji: "👤",
+    homeBarangay: user.homeBarangay,
+    role,
+    status: UserStatus.Active,
+    coinBalance: 0,
+  };
+  return {
+    ...demoState,
+    profile: {
+      ...demoState.profile,
+      id: user.id,
+      displayName: user.displayName,
+      avatarEmoji: managedUser.avatarEmoji,
+      homeBarangay: user.homeBarangay,
+      bio: "",
+      role,
+    },
+    wallet: { ...demoState.wallet, balance: 0, transactions: [], sharedToday: 0, lastShareDate: null },
+    adminUsers: { users: [managedUser], history: [] },
+    playerMissions: { claimedMissionIds: [] },
+    streak: { currentStreak: 0, longestStreak: 0, lastPlayedDate: null, claimedMilestoneDays: [] },
+  };
+}
+
+export function consumeParentLaunch(
+  user: ParentGameIdentity,
+  launchId: string,
+  parentSessionId: string,
+  expiresAt: number,
+): boolean {
+  const db = getDatabase();
+  return db.transaction(() => {
+    const launchInsert = db.prepare(`
+      INSERT OR IGNORE INTO consumed_parent_launches (launch_id, parent_user_id, parent_session_id, expires_at, consumed_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(launchId, user.id, parentSessionId, expiresAt, new Date().toISOString());
+    if (launchInsert.changes !== 1) return false;
+
+    const existing = db.prepare("SELECT parent_user_id FROM game_center_user_states WHERE parent_user_id = ?").get(user.id);
+    if (!existing) {
+      db.prepare("INSERT INTO game_center_user_states (parent_user_id, state_json) VALUES (?, ?)")
+        .run(user.id, JSON.stringify(createParentPlayerState(user)));
+    }
+    return true;
+  })();
+}
+
+export function readParentPlayerState(parentUserId: string): PersistedState | null {
+  const row = getDatabase().prepare("SELECT state_json FROM game_center_user_states WHERE parent_user_id = ?")
+    .get(parentUserId) as { state_json: string } | undefined;
+  return row ? JSON.parse(row.state_json) as PersistedState : null;
+}
+
+export function readParentPlayerUserIds(): string[] {
+  return (getDatabase().prepare("SELECT parent_user_id FROM game_center_user_states ORDER BY parent_user_id").all() as Array<{ parent_user_id: string }>)
+    .map((row) => row.parent_user_id);
+}
+
+export function readGameCenterPlayerState(parentUserId: string): PersistedState | null {
+  return readParentPlayerState(parentUserId);
+}
+
+export function saveParentPlayerState(parentUserId: string, state: PersistedState): void {
+  if (state.profile.id !== parentUserId) throw new Error("Parent player state identity mismatch.");
+  getDatabase().prepare(`
+    INSERT INTO game_center_user_states (parent_user_id, state_json, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(parent_user_id) DO UPDATE SET state_json = excluded.state_json, updated_at = CURRENT_TIMESTAMP
+  `).run(parentUserId, JSON.stringify(state));
+}
+
+export function resetParentPlayerState(user: ParentGameIdentity): PersistedState {
+  const state = createParentPlayerState(user);
+  saveParentPlayerState(user.id, state);
+  return state;
+}
 
 export interface CoinPurchase {
   id: string;
@@ -302,6 +392,22 @@ function getDatabase(): Database.Database {
       received_at TEXT NOT NULL
     )
   `);
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS game_center_user_states (
+      parent_user_id TEXT PRIMARY KEY NOT NULL,
+      state_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS consumed_parent_launches (
+      launch_id TEXT PRIMARY KEY NOT NULL,
+      parent_user_id TEXT NOT NULL,
+      parent_session_id TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      consumed_at TEXT NOT NULL
+    )
+  `);
   seedDatabase();
   applySandboxCoinConversionMigration(database);
   return database;
@@ -497,6 +603,7 @@ export function findCoinPurchaseForPlayer(purchaseId: string, playerId: string):
 export type CoinPurchaseFulfillment = "credited" | "duplicate" | "not-found" | "session-mismatch" | "player-mismatch" | "not-pending";
 
 export function fulfillCoinPurchase(input: {
+  playerId: string;
   referenceNumber: string;
   checkoutSessionId: string;
   paymentId: string;
@@ -506,18 +613,18 @@ export function fulfillCoinPurchase(input: {
   return db.transaction((): CoinPurchaseFulfillment => {
     const row = db.prepare("SELECT * FROM coin_purchases WHERE reference_number = ?").get(input.referenceNumber) as CoinPurchaseRow | undefined;
     if (!row) return "not-found";
+    if (row.player_id !== input.playerId) return "player-mismatch";
     if (row.checkout_session_id !== input.checkoutSessionId) return "session-mismatch";
 
     const priorEvent = db.prepare("SELECT event_id FROM coin_purchase_webhook_events WHERE event_id = ?").get(input.eventId);
     if (priorEvent || row.status === "paid") return "duplicate";
     if (row.status !== "pending") return "not-pending";
 
-    const stateRows = db.prepare("SELECT key, value FROM app_state WHERE key IN ('profile', 'wallet', 'adminUsers')").all() as Array<{ key: string; value: string }>;
-    const stateByKey = new Map(stateRows.map((stateRow) => [stateRow.key, JSON.parse(stateRow.value) as Record<string, any>]));
-    const profile = stateByKey.get("profile");
-    const wallet = stateByKey.get("wallet");
-    const adminUsers = stateByKey.get("adminUsers");
-    if (!profile || !wallet || !adminUsers || profile.id !== row.player_id) return "player-mismatch";
+    const playerState = readParentPlayerState(row.player_id);
+    if (!playerState || playerState.profile.id !== row.player_id) return "player-mismatch";
+    const profile = playerState.profile as unknown as Record<string, any>;
+    const wallet = playerState.wallet;
+    const adminUsers = playerState.adminUsers as unknown as Record<string, any>;
     const managedProfile = findManagedProfileRecord(adminUsers, profile);
 
     const paidAt = new Date().toISOString();
@@ -530,9 +637,9 @@ export function fulfillCoinPurchase(input: {
       createdAt: paidAt,
       source,
     };
-    const updatedWallet = {
+    const updatedWallet: PersistedState["wallet"] = {
       ...wallet,
-      balance: Number(wallet.balance) + row.coins,
+      balance: wallet.balance + row.coins,
       transactions: [walletTransaction, ...(wallet.transactions ?? [])],
     };
     const historyEntry = {
@@ -545,20 +652,20 @@ export function fulfillCoinPurchase(input: {
       adminName: "PayMongo Test Checkout",
       createdAt: paidAt,
     };
-    const updatedAdminUsers = {
-      ...adminUsers,
-      history: [historyEntry, ...(adminUsers.history ?? [])],
-      users: (adminUsers.users ?? []).map((user: { id: string; coinBalance: number }) =>
+    const updatedAdminUsers: PersistedState["adminUsers"] = {
+      ...playerState.adminUsers,
+      history: [historyEntry, ...playerState.adminUsers.history],
+      users: playerState.adminUsers.users.map((user) =>
         user.id === managedProfile?.id ? { ...user, coinBalance: Number(updatedWallet.balance) } : user,
       ),
     };
-    const writeStateValue = db.prepare(`
-      INSERT INTO app_state (key, value, updated_at)
-      VALUES (@key, @value, CURRENT_TIMESTAMP)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `);
-    writeStateValue.run({ key: "wallet", value: JSON.stringify(updatedWallet) });
-    writeStateValue.run({ key: "adminUsers", value: JSON.stringify(updatedAdminUsers) });
+    playerState.wallet = updatedWallet;
+    playerState.adminUsers = updatedAdminUsers;
+    db.prepare(`
+      UPDATE game_center_user_states
+      SET state_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE parent_user_id = ?
+    `).run(JSON.stringify(playerState), row.player_id);
     db.prepare(`
       INSERT INTO coin_purchase_webhook_events (event_id, purchase_id, received_at)
       VALUES (?, ?, ?)
@@ -622,6 +729,8 @@ export function resetState(): PersistedState {
   database!.prepare("DELETE FROM game_registrations").run();
   database!.prepare("DELETE FROM coin_purchases").run();
   database!.prepare("DELETE FROM coin_purchase_webhook_events").run();
+  database!.prepare("DELETE FROM game_center_user_states").run();
+  database!.prepare("DELETE FROM consumed_parent_launches").run();
   seedDatabase();
   return readState();
 }
@@ -630,3 +739,8 @@ export function revealGameRegistrationCredentials(appKey: string): { appKey: str
   const record = findGameRegistration(appKey);
   return record ? { appKey: record.registration.appKey, signingSecret: record.signingSecret } : null;
 }
+
+export function findParentPlayerState(parentUserId: string): PersistedState | null {
+  return readParentPlayerState(parentUserId);
+}
+

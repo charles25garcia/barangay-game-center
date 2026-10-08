@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createProviderTransaction, findGameRegistration, findProviderTransaction, readState, saveState } from "@code/database/sqlite";
+import { createProviderTransaction, findGameRegistration, findParentPlayerState, findProviderTransaction, readParentPlayerUserIds, saveParentPlayerState } from "@code/database/sqlite";
 import { isValidSignature, signInbetweenPayload } from "@code/database/providerSecurity";
 import { CoinAdjustmentType, TransactionType } from "@shared/enums";
 import type { CoinHistoryEntry } from "@shared/types";
@@ -31,7 +31,16 @@ export async function POST(request: Request, context: RouteContext) {
   if (!registrationRecord) return errorResponse("Registered app not found.", 404);
   if (registrationRecord.registration.status !== "active") return errorResponse("Registered app is not active.", 403);
 
-  const body = (await request.json()) as Record<string, unknown>;
+  let parsedBody: unknown;
+  try {
+    parsedBody = await request.json();
+  } catch {
+    return errorResponse("Request body must be a valid JSON object.", 400);
+  }
+  if (parsedBody === null || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+    return errorResponse("Request body must be a valid JSON object.", 400);
+  }
+  const body = parsedBody as Record<string, unknown>;
   if (
     operation === "auth" &&
     body.secretKey === registrationRecord.signingSecret &&
@@ -71,10 +80,9 @@ function readPlayerBalance(
   const { registration } = registrationRecord;
   const externalUserId = readContractField(payload, registration.externalUserIdField, ["externalUserId", "username", "userName"]);
   const gameType = readContractField(payload, registration.gameTypeField, ["gameType"]);
-  const state = readState();
-  const knownUser = state.profile.id === externalUserId || state.adminUsers.users.some((user) => user.id === externalUserId);
   if (!externalUserId || !gameType) return errorResponse("externalUserId and gameType are required.", 400);
-  if (!knownUser) return errorResponse("External user was not found.", 404);
+  const state = findParentPlayerState(externalUserId);
+  if (!state) return errorResponse("External user was not found.", 404);
 
   return signedSuccessResponse({
     appKey: registration.appKey,
@@ -95,10 +103,9 @@ function authenticateApp(
   const gameType = readContractField(payload, registration.gameTypeField, ["gameType"]);
   if (!externalUserId || !gameType) return errorResponse("externalUserId and gameType are required.", 400);
 
-  const state = readState();
-  const platformUser = state.profile.id === externalUserId
-    ? state.profile
-    : state.adminUsers.users.find((user) => user.id === externalUserId);
+  const state = findParentPlayerState(externalUserId);
+  if (!state) return errorResponse("External user was not found.", 404);
+  const platformUser = state.profile;
 
   const data = {
     appKey: registrationRecord.registration.appKey,
@@ -133,8 +140,7 @@ function recordChipTransaction(
   requestSignature: string,
 ) {
   const { registration } = registrationRecord;
-  const state = readState();
-  const externalUserId = readContractField(payload, registration.externalUserIdField, ["externalUserId", "username", "userName"]) || state.profile.id;
+  let externalUserId = readContractField(payload, registration.externalUserIdField, ["externalUserId", "username", "userName"]);
   const externalTransactionId = readContractField(payload, registration.transactionIdField, ["externalTransactionId", "transId"]);
   const requestId = readContractField(payload, registration.requestIdField, ["requestId", "request_id"]) || externalTransactionId;
   const roundId = readContractField(payload, "roundId", ["round_id"]) || externalTransactionId;
@@ -145,6 +151,16 @@ function recordChipTransaction(
   if (!externalTransactionId || !gameType || !transactionType || !Number.isFinite(amount) || amount <= 0) {
     return errorResponse("Transaction ID, game type, transaction type, and a positive amount are required.", 400);
   }
+
+  let state = externalUserId ? findParentPlayerState(externalUserId) : null;
+  if (!state && !externalUserId) {
+    const activeParentUsers = readParentPlayerUserIds();
+    if (activeParentUsers.length === 1) {
+      externalUserId = activeParentUsers[0];
+      state = findParentPlayerState(externalUserId);
+    }
+  }
+  if (!state) return errorResponse("External user was not found.", 404);
 
   if (direction === "deduct" && amount > state.wallet.balance
     && !findProviderTransaction(registration.id, externalTransactionId, direction)) {
@@ -189,7 +205,7 @@ function recordChipTransaction(
       createdAt: result.transaction.createdAt,
       source,
     }, walletBalance);
-    saveProviderCoinHistory(readState(), historyEntry);
+    saveProviderCoinHistory(findParentPlayerState(externalUserId)!, historyEntry);
   }
   const data = {
     transactionId: result.transaction.id,
@@ -198,13 +214,13 @@ function recordChipTransaction(
     source: result.transaction.source,
     direction,
     amount,
-    balance: readState().wallet.balance,
+    balance: findParentPlayerState(externalUserId)?.wallet.balance ?? state.wallet.balance,
     status: result.duplicate ? "duplicate" : "accepted",
   };
   return signedSuccessResponse(data, registrationRecord.signingSecret, requestSignature, result.duplicate ? 200 : 201);
 }
 
-function resolveExternalUserName(state: ReturnType<typeof readState>, externalUserId: string): string {
+function resolveExternalUserName(state: ReturnType<typeof findParentPlayerState> & object, externalUserId: string): string {
   const profileUser = state.profile.id === externalUserId ? state.profile : null;
   if (profileUser?.displayName) return profileUser.displayName;
 
@@ -213,11 +229,11 @@ function resolveExternalUserName(state: ReturnType<typeof readState>, externalUs
 }
 
 function saveProviderWalletTransaction(
-  state: ReturnType<typeof readState>,
+  state: ReturnType<typeof findParentPlayerState> & object,
   transaction: { id: string; type: TransactionType; amount: number; reason: string; createdAt: string; source: string },
   balance: number,
 ) {
-  saveState({
+  saveParentPlayerState(state.profile.id, {
     ...state,
     wallet: {
       ...state.wallet,
@@ -227,7 +243,7 @@ function saveProviderWalletTransaction(
   });
 }
 
-function saveProviderCoinHistory(state: ReturnType<typeof readState>, entry: CoinHistoryEntry) {
+function saveProviderCoinHistory(state: ReturnType<typeof findParentPlayerState> & object, entry: CoinHistoryEntry) {
   const updatedUsers = state.adminUsers.users.map((user) => {
     if (user.id !== entry.userId) return user;
     const nextBalance = entry.adjustmentType === CoinAdjustmentType.Credit
@@ -240,7 +256,7 @@ function saveProviderCoinHistory(state: ReturnType<typeof readState>, entry: Coi
     };
   });
 
-  saveState({
+  saveParentPlayerState(state.profile.id, {
     ...state,
     adminUsers: {
       ...state.adminUsers,

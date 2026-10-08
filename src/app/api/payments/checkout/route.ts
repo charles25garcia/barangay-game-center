@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { createCoinPurchase, failCoinPurchase, readState, setCoinPurchaseCheckout } from "@code/database/sqlite";
+import { createCoinPurchase, failCoinPurchase, setCoinPurchaseCheckout } from "@code/database/sqlite";
+import { getGameCenterSession } from "@code/auth/parentSession";
 import { getPayMongoTestPaymentMethods, getPayMongoTestSecret } from "@code/payments/paymongoTestMode";
 import { findTestCoinPackage } from "@shared/utils";
 
@@ -17,6 +18,8 @@ export function GET() {
 }
 
 export async function POST(request: Request) {
+  const session = await getGameCenterSession();
+  if (!session) return NextResponse.json({ message: "Parent platform sign-in required." }, { status: 401 });
   const secret = getPayMongoTestSecret();
   if (!secret || !process.env.PAYMONGO_TEST_WEBHOOK_SECRET) return unavailable();
   const paymentMethodTypes = getPayMongoTestPaymentMethods();
@@ -37,8 +40,7 @@ export async function POST(request: Request) {
   const coinPackage = findTestCoinPackage((body as { packageId: string }).packageId);
   if (!coinPackage) return NextResponse.json({ message: "That sandbox package is unavailable." }, { status: 400 });
 
-  const state = readState();
-  const purchase = createCoinPurchase(state.profile.id, coinPackage);
+  const purchase = createCoinPurchase(session.user.id, coinPackage);
   const baseUrl = process.env.GAME_CENTER_BASE_URL || new URL(request.url).origin;
   const successUrl = new URL("/wallet/top-up", baseUrl);
   successUrl.searchParams.set("purchaseId", purchase.id);

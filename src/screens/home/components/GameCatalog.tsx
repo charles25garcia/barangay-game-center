@@ -4,14 +4,12 @@ import { GameLaunchType, GameStatus } from "@shared/enums";
 import type { Game } from "@shared/types";
 import { coinsDebited, useAppDispatch, useAppSelector, useRecordGamePlay } from "@code/state";
 import { selectAllGames, selectWalletBalance } from "@code/state";
-import { selectPlayerProfile } from "@code/state";
 import { GameCard } from "./GameCard";
 
 export function GameCatalog() {
   const dispatch = useAppDispatch();
   const games = useAppSelector(selectAllGames);
   const balance = useAppSelector(selectWalletBalance);
-  const profile = useAppSelector(selectPlayerProfile);
   const recordGamePlay = useRecordGamePlay();
 
   async function handlePlay(game: Game) {
@@ -31,9 +29,7 @@ export function GameCatalog() {
     if (game.launchType === GameLaunchType.ExternalUrl && game.launchTarget) {
       const launchWindow = window.open("about:blank", "_blank");
       try {
-        const response = await fetch(`/api/game-registrations/${encodeURIComponent(game.slug)}/launch`, {
-          headers: { "X-Player-Id": profile.id },
-        });
+        const response = await fetch(`/api/game-registrations/${encodeURIComponent(game.slug)}/launch`);
         const body = (await response.json()) as { launchUrl?: string; message?: string };
         if (!response.ok || !body.launchUrl) throw new Error(body.message || "Could not launch the registered app.");
         if (launchWindow) {

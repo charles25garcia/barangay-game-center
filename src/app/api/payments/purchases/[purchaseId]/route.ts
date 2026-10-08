@@ -1,15 +1,17 @@
 import { NextResponse } from "next/server";
-import { findCoinPurchaseForPlayer, fulfillCoinPurchase, readState, synchronizeDemoProfileManagedBalance } from "@code/database/sqlite";
+import { findCoinPurchaseForPlayer, fulfillCoinPurchase } from "@code/database/sqlite";
 import { getPayMongoTestSecret } from "@code/payments/paymongoTestMode";
+import { getGameCenterSession } from "@code/auth/parentSession";
 
 export const runtime = "nodejs";
 
 export async function GET(_request: Request, context: { params: Promise<{ purchaseId: string }> }) {
   const { purchaseId } = await context.params;
-  const playerId = readState().profile.id;
+  const session = await getGameCenterSession();
+  if (!session) return NextResponse.json({ message: "Parent platform sign-in required." }, { status: 401 });
+  const playerId = session.user.id;
   let purchase = findCoinPurchaseForPlayer(purchaseId, playerId);
   if (!purchase) return NextResponse.json({ message: "Purchase not found." }, { status: 404 });
-  synchronizeDemoProfileManagedBalance(playerId);
 
   const secret = getPayMongoTestSecret();
   if (purchase.status === "pending" && secret && purchase.checkoutSessionId) {
@@ -44,6 +46,7 @@ export async function GET(_request: Request, context: { params: Promise<{ purcha
           paymentAttributes.currency === purchase.currency
         ) {
           fulfillCoinPurchase({
+            playerId,
             referenceNumber: purchase.referenceNumber,
             checkoutSessionId: session.id,
             paymentId: paidPayment.id,

@@ -5,6 +5,12 @@ import { signInbetweenPayload } from "@code/database/providerSecurity";
 import { GameCategory, GameLaunchType, GameStatus } from "@shared/enums";
 import { GET } from "./route";
 
+jest.mock("@code/auth/parentSession", () => ({
+  getGameCenterSession: jest.fn().mockResolvedValue({
+    user: { id: "player-demo-001", displayName: "Juan Dela Cruz", homeBarangay: "Barangay San Isidro" },
+  }),
+}));
+
 const registrationInput = {
   appName: "Launch Test App",
   providerName: "Test Provider",
@@ -40,16 +46,14 @@ it("creates a signed launch URL with the current platform user", async () => {
   const body = await response.json();
   const launchUrl = new URL(body.launchUrl);
   const payload = {
-    platformName: launchUrl.searchParams.get("platformName"),
     username: launchUrl.searchParams.get("username"),
     userToken: launchUrl.searchParams.get("userToken"),
+    platformName: launchUrl.searchParams.get("platformName"),
     gameType: launchUrl.searchParams.get("gameType"),
-    displayName: launchUrl.searchParams.get("displayName"),
-    avatarEmoji: launchUrl.searchParams.get("avatarEmoji"),
-    homeBarangay: launchUrl.searchParams.get("homeBarangay"),
   };
 
   expect(response.status).toBe(200);
   expect(payload.username).toBe("player-demo-001");
+  expect(launchUrl.searchParams.get("displayName")).toBe("Juan Dela Cruz");
   expect(body.sign).toBe(signInbetweenPayload(payload, findGameRegistration(registration.appKey)!.signingSecret));
 });

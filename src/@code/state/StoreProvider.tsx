@@ -15,8 +15,10 @@ export function StoreProvider({ children }: StoreProviderProps) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/state")
-      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("SQLite state unavailable"))))
+    fetch("/api/auth/session", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("Parent platform session required"))))
+      .then(() => fetch("/api/state", { cache: "no-store" }))
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("Player state unavailable"))))
       .then(async (state: Partial<RootState>) => {
         if (cancelled) return;
         const registrationsResponse = await fetch("/api/game-registrations");
@@ -28,7 +30,7 @@ export function StoreProvider({ children }: StoreProviderProps) {
         setIsHydrated(true);
       })
       .catch(() => {
-        if (!cancelled) setIsHydrated(true);
+        if (!cancelled) window.location.replace("/auth/required");
       });
 
     return () => {
