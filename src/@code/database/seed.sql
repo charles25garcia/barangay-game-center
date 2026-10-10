@@ -8,7 +8,7 @@ INSERT OR IGNORE INTO app_state (key, value, updated_at) VALUES
 ('streak', '{"currentStreak":0,"longestStreak":0,"lastPlayedDate":null,"claimedMilestoneDays":[]}', CURRENT_TIMESTAMP),
 ('playerMissions', '{"claimedMissionIds":[]}', CURRENT_TIMESTAMP);
 
-INSERT OR IGNORE INTO game_registrations (
+INSERT INTO game_registrations (
   id, app_key, app_name, provider_name, description, launch_url, api_base_url,
   auth_endpoint, balance_endpoint, add_chips_endpoint, deduct_chips_endpoint, credential_reference,
   signature_algorithm, external_user_id_field, transaction_id_field,
@@ -24,10 +24,17 @@ INSERT OR IGNORE INTO game_registrations (
   'arcade', 10, 'external-url', 'active', 1, '', '2026-09-01T00:00:00.000Z'
 ),
 (
-  'game-reg-003', 'inbetween', 'In Between Cards', 'Barangay Card House',
+  'game-reg-003', 'e939c295111af7397549aec19dd1073cfe4040b22d62c1dcb34f62a0a3d0403a', 'In Between Cards', 'Barangay Card House',
   'Classic In-Between card game with instant coin payouts and resident leaderboard ranking.',
   'https://ib-automated.oraytph.com', 'https://ib-automated.oraytph.com/api',
   '/auth', '/balance', '/chips/add', '/chips/deduct', 'ref-inbetween',
   'hmac-sha256', 'userId', 'transactionId', 'type', 'gameType', 'requestId',
-  'card', 20, 'external-url', 'active', 1, '', '2026-09-03T00:00:00.000Z'
-);
+  'card', 20, 'external-url', 'active', 1, '342ea0ddbec474ab828328d4ba72fc9c979615ec4ce083b440bb1e948dfc5cf0', '2026-09-03T00:00:00.000Z'
+)
+ON CONFLICT(id) DO UPDATE SET
+  app_key = excluded.app_key,
+  signing_secret_ciphertext = excluded.signing_secret_ciphertext,
+  launch_url = excluded.launch_url,
+  api_base_url = excluded.api_base_url,
+  status = excluded.status,
+  active = excluded.active;
