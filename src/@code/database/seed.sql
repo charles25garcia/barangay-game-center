@@ -29,12 +29,13 @@ INSERT INTO game_registrations (
   'https://ib-automated.oraytph.com', 'https://ib-automated.oraytph.com/api',
   '/auth', '/balance', '/chips/add', '/chips/deduct', 'ref-inbetween',
   'hmac-sha256', 'userId', 'transactionId', 'type', 'gameType', 'requestId',
-  'card', 20, 'external-url', 'active', 1, '342ea0ddbec474ab828328d4ba72fc9c979615ec4ce083b440bb1e948dfc5cf0', '2026-09-03T00:00:00.000Z'
+  'card', 0, 'external-url', 'active', 1, '342ea0ddbec474ab828328d4ba72fc9c979615ec4ce083b440bb1e948dfc5cf0', '2026-09-03T00:00:00.000Z'
 )
 ON CONFLICT(id) DO UPDATE SET
   app_key = excluded.app_key,
   signing_secret_ciphertext = excluded.signing_secret_ciphertext,
   launch_url = excluded.launch_url,
   api_base_url = excluded.api_base_url,
+  cost_per_play = excluded.cost_per_play,
   status = excluded.status,
   active = excluded.active;
